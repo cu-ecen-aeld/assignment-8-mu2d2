@@ -1,0 +1,94 @@
+#!/bin/sh
+#
+# S98lddmodules - Load/unload ldd3 kernel modules: scull, faulty, hello
+# This script is intended to be run at startup by Buildroot's init system.
+
+# Buildroot's modules_install places .ko files under
+#   /lib/modules/<kernel-version>/extra/<subdir>/
+# $(uname -r) expands to the running kernel version at runtime.
+MODULES_DIR=/lib/modules/$(uname -r)/extra
+
+# Permission mode for character device nodes: owner+group rw, others r
+MODE="664"
+
+# Determine the group to assign to device nodes.
+# Buildroot images typically use 'wheel'; fall back to 'staff' like the
+# reference scull_load/module_load scripts from ldd3.
+if grep -q '^staff:' /etc/group; then
+    GROUP="staff"
+else
+    GROUP="wheel"
+fi
+
+start() {
+    # scull - character device driver with multiple minor devices
+    # Based on scull_load reference script in scull/scull_load
+    printf "Loading scull: "
+    insmod ${MODULES_DIR}/scull/scull.ko || { echo "FAILED"; exit 1; }
+
+    # Retrieve the dynamically allocated major number from /proc/devices
+    MAJOR=$(awk "\$2==\"scull\" {print \$1}" /proc/devices)
+
+    # Create the four primary scull device nodes (minor 0-3)
+    rm -f /dev/scull[0-3]
+    mknod /dev/scull0 c $MAJOR 0
+    mknod /dev/scull1 c $MAJOR 1
+    mknod /dev/scull2 c $MAJOR 2
+    mknod /dev/scull3 c $MAJOR 3
+    # Convenience symlink: /dev/scull -> /dev/scull0
+    ln -sf scull0 /dev/scull
+    chgrp $GROUP /dev/scull[0-3]
+    chmod $MODE  /dev/scull[0-3]
+    echo "OK"
+
+    # faulty - character device driver that intentionally causes a kernel oops
+    # Based on module_load reference script in misc-modules/module_load
+    printf "Loading faulty: "
+    insmod ${MODULES_DIR}/misc-modules/faulty.ko || { echo "FAILED"; exit 1; }
+
+    MAJOR=$(awk "\$2==\"faulty\" {print \$1}" /proc/devices)
+    rm -f /dev/faulty
+    mknod /dev/faulty c $MAJOR 0
+    chgrp $GROUP /dev/faulty
+    chmod $MODE  /dev/faulty
+    echo "OK"
+
+    # hello - simple printk demonstration module, no device node needed
+    # modprobe is used (vs insmod) because depmod runs at Buildroot image
+    # creation time, making the module resolvable by name without a path
+    printf "Loading hello: "
+    modprobe hello || { echo "FAILED"; exit 1; }
+    echo "OK"
+}
+
+stop() {
+    # Unload in reverse load order to respect any implicit dependencies
+
+    printf "Unloading hello: "
+    rmmod hello && echo "OK" || echo "FAILED"
+
+    printf "Unloading faulty: "
+    rmmod faulty && echo "OK" || echo "FAILED"
+    rm -f /dev/faulty
+
+    printf "Unloading scull: "
+    rmmod scull && echo "OK" || echo "FAILED"
+    rm -f /dev/scull /dev/scull[0-3]
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
